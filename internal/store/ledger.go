@@ -91,7 +91,8 @@ func (l *Ledger) replayAndValidate() error {
 	file, err := os.Open(l.ledgerPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return l.validateSnapshotAgainstProjection(projectedCampaigns, projectedKeys, 0, "")
+			_, err := l.validateSnapshotAgainstProjection(projectedCampaigns, projectedKeys, nil, 0, "")
+			return err
 		}
 		return fmt.Errorf("读取事件账本: %w", err)
 	}
@@ -100,6 +101,8 @@ func (l *Ledger) replayAndValidate() error {
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	var sequence int64
 	var previous string
+	// digestBySeq 记录事件账本中每个序号对应的事件摘要，用于校验滞后的投影快照游标是否仍指向权威链上的真实事件。
+	digestBySeq := []string{""}
 	line := 0
 	for scanner.Scan() {
 		line++
@@ -144,50 +147,83 @@ func (l *Ledger) replayAndValidate() error {
 		projectedKeys[event.IdempotencyKey] = idempotencyRecord{CampaignID: event.CampaignID, Sequence: event.Sequence, Result: result}
 		sequence = event.Sequence
 		previous = event.Digest
+		digestBySeq = append(digestBySeq, previous)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("扫描事件账本: %w", err)
 	}
-	if err := l.validateSnapshotAgainstProjection(projectedCampaigns, projectedKeys, sequence, previous); err != nil {
+	healed, err := l.validateSnapshotAgainstProjection(projectedCampaigns, projectedKeys, digestBySeq, sequence, previous)
+	if err != nil {
 		return err
 	}
 	l.campaigns = projectedCampaigns
 	l.idempotency = projectedKeys
 	l.sequence = sequence
 	l.lastDigest = previous
+	// 当启动检测到投影快照滞后于权威事件账本（崩溃发生在事件日志 fsync 之后、新快照原子替换之前）时，
+	// 以权威账本投影自愈一次投影快照，使后续启动回到快照与日志对齐的稳态。
+	if healed {
+		if err := l.writeSnapshotLocked(time.Now()); err != nil {
+			return fmt.Errorf("自愈投影快照: %w", err)
+		}
+	}
 	return nil
 }
 
-func (l *Ledger) validateSnapshotAgainstProjection(campaigns map[string]*domain.Aggregate, keys map[string]idempotencyRecord, sequence int64, digest string) error {
+// validateSnapshotAgainstProjection 校验磁盘上的投影快照是否与以事件账本权威重放得到的投影一致。
+// digestBySeq 为长度 sequence+1 的切片，digestBySeq[0]==""，digestBySeq[i] 为第 i 条事件摘要；
+// 据此可判断滞后快照游标 (LastSequence, LastDigest) 是否仍指向权威链上的真实事件。
+// 返回 healed=true 表示快照曾落后于权威账本、已按账本投影恢复，调用方据此触发一次自愈写入。
+func (l *Ledger) validateSnapshotAgainstProjection(campaigns map[string]*domain.Aggregate, keys map[string]idempotencyRecord, digestBySeq []string, sequence int64, digest string) (bool, error) {
 	b, err := os.ReadFile(l.snapshotPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			l.campaigns, l.idempotency, l.sequence, l.lastDigest = campaigns, keys, sequence, digest
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("读取快照: %w", err)
+		return false, fmt.Errorf("读取快照: %w", err)
 	}
 	var saved snapshot
 	if err := json.Unmarshal(b, &saved); err != nil {
-		return fmt.Errorf("解析快照: %w", err)
+		return false, fmt.Errorf("解析快照: %w", err)
 	}
-	if saved.SchemaVersion != 1 || saved.LastSequence != sequence || saved.LastDigest != digest {
-		return fmt.Errorf("快照与事件账本游标不一致")
+	if saved.SchemaVersion != 1 {
+		return false, fmt.Errorf("快照模式版本不一致")
 	}
-	if len(saved.Campaigns) != len(campaigns) || len(saved.Idempotency) != len(keys) {
-		return fmt.Errorf("快照与事件账本投影数量不一致")
-	}
-	for id, replayed := range campaigns {
-		snapshotCampaign, ok := saved.Campaigns[id]
-		if !ok || !reflect.DeepEqual(snapshotCampaign, replayed) {
-			return fmt.Errorf("快照任务 %s 的版本不一致", id)
+	// 快照游标恰好对齐权威账本末端时仍保持严格一致性校验，以保留篡改检测行为。
+	if saved.LastSequence == sequence {
+		if saved.LastDigest != digest {
+			return false, fmt.Errorf("快照与事件账本游标不一致")
 		}
+		if len(saved.Campaigns) != len(campaigns) || len(saved.Idempotency) != len(keys) {
+			return false, fmt.Errorf("快照与事件账本投影数量不一致")
+		}
+		for id, replayed := range campaigns {
+			snapshotCampaign, ok := saved.Campaigns[id]
+			if !ok || !reflect.DeepEqual(snapshotCampaign, replayed) {
+				return false, fmt.Errorf("快照任务 %s 的版本不一致", id)
+			}
+		}
+		if !reflect.DeepEqual(saved.Idempotency, keys) {
+			return false, fmt.Errorf("快照幂等投影与事件账本不一致")
+		}
+		l.campaigns, l.idempotency, l.sequence, l.lastDigest = campaigns, keys, sequence, digest
+		return false, nil
 	}
-	if !reflect.DeepEqual(saved.Idempotency, keys) {
-		return fmt.Errorf("快照幂等投影与事件账本不一致")
+	// 快照游标超前于权威账本（账本缺失尾部事件）视为不可恢复的损坏。
+	if saved.LastSequence > sequence {
+		return false, fmt.Errorf("快照游标超前于事件账本")
+	}
+	// 快照游标落在权威链内部：仅当其 LastDigest 与该序号对应的事件摘要一致时，
+	// 才认定快照是崩溃恢复中残留的滞后投影，按 replayRecoveryPolicy 以账本投影自愈。
+	if int(saved.LastSequence) >= len(digestBySeq) {
+		return false, fmt.Errorf("快照游标超出事件账本序号范围")
+	}
+	if saved.LastDigest != digestBySeq[saved.LastSequence] {
+		return false, fmt.Errorf("快照游标与事件账本链不一致")
 	}
 	l.campaigns, l.idempotency, l.sequence, l.lastDigest = campaigns, keys, sequence, digest
-	return nil
+	return true, nil
 }
 
 func digestEvent(event LedgerEvent) (string, error) {
