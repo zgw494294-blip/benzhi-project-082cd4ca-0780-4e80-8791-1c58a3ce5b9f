@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="高压电缆局部放电试验证据、复验、审核与放行工作台">
+  <title>局部放电放行工作台</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><p class="eyebrow">INSULATION ASSURANCE</p><h1>局部放电放行工作台</h1></div>
+    <div id="health" class="health"><span></span>账本连接中</div>
+  </header>
+  <main>
+    <aside class="sidebar">
+      <div class="side-title"><h2>试验任务</h2><button id="refresh" class="quiet">刷新</button></div>
+      <div id="campaign-list" class="campaign-list"><p class="muted">正在读取任务…</p></div>
+      <button id="new-campaign" class="primary full">＋ 新建试验任务</button>
+    </aside>
+    <section class="workspace">
+      <div id="notice" class="notice hidden" role="status"></div>
+      <section id="empty" class="empty panel">
+        <p class="eyebrow">EVIDENCE FIRST</p>
+        <h2>让每一次放行都能回到原始证据</h2>
+        <p>从三相测量开始，沿确定性评估、异常复验、专家审核和证据冻结的单一状态链完成放行。</p>
+      </section>
+      <section id="campaign" class="hidden">
+        <div class="campaign-head panel">
+          <div><p id="campaign-id" class="mono muted"></p><h2 id="campaign-name"></h2><p id="campaign-meta" class="muted"></p></div>
+          <div><span id="campaign-status" class="status"></span><span id="campaign-version" class="version"></span></div>
+        </div>
+        <nav class="steps" aria-label="任务流程">
+          <span data-step="awaiting_collection">01 测量</span><span data-step="collected">02 评估</span><span data-step="awaiting_retest">03 复验</span><span data-step="awaiting_review">04 审核</span><span data-step="approved">05 冻结</span><span data-step="frozen">06 签发</span><span data-step="released">07 验证</span>
+        </nav>
+        <div class="grid">
+          <section class="panel"><h3>任务证据</h3><div id="evidence"></div></section>
+          <section class="panel action-panel"><h3>当前操作</h3><div id="action"></div></section>
+        </div>
+        <section class="panel"><h3>审计轨迹</h3><div id="audit" class="audit"></div></section>
+      </section>
+      <section class="panel verify-panel">
+        <div><p class="eyebrow">OFFLINE FORMAT</p><h3>放行凭据验证</h3><p class="muted">粘贴 PD1 格式凭据，先校验离线载荷，再与本机账本中的冻结证据核对。</p></div>
+        <form id="verify-form"><textarea name="code" placeholder="PD1.…" required></textarea><button class="secondary">验证凭据</button></form>
+        <div id="verify-result"></div>
+      </section>
+    </section>
+  </main>
+  <dialog id="create-dialog">
+    <form id="create-form" method="dialog">
+      <div class="dialog-head"><h2>新建试验任务</h2><button type="button" data-close class="icon">×</button></div>
+      <label>电缆段<input name="cableSegment" required maxlength="120" placeholder="例如：东区 220kV I 回 3#—4# 接头段"></label>
+      <label>绝缘结构<input name="insulationStructure" required maxlength="120" placeholder="例如：XLPE / 预制式中间接头"></label>
+      <label>额定电压（kV）<input name="ratedVoltageKv" type="number" min="1" max="1500" step="0.1" required value="220"></label>
+      <label>试验方案<textarea name="testPlan" required maxlength="500" placeholder="填写施加电压、采集窗口与接线方案"></textarea></label>
+      <label>责任试验员<input name="operator" required maxlength="80"></label>
+      <div class="actions"><button type="button" data-close class="quiet">取消</button><button class="primary">建档并进入采集</button></div>
+    </form>
+  </dialog>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
